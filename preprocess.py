@@ -1,37 +1,47 @@
 import re
 
 from pyspark.sql import SparkSession
+from pyspark.sql.types import StructType, StructField, StringType, BooleanType, IntegerType, FloatType
 
 # Initialize Spark Session
 spark = SparkSession.builder.appName("Preprocess").getOrCreate()
 
-hdfs_pgn_file = f"hdfs:///user/s2706172/lichess-dataset/lichess_db_standard_rated_2023-01.pgn"
+hdfs_pgn_file = f"hdfs:///user/s3262642/lichess_db_standard_rated_2023-05.pgn"
 data = spark.read.option("delimiter", "[Event").text(hdfs_pgn_file)
 
+
 # Define the schema
-move_schema = {
-    "MarkAsDeleted": False,
-    "White": "",
-    "Black": "",
-    "Result": "",
-    "WhiteElo": 0,
-    "BlackElo": 0,
-    "StartingTime": 0,
-    "Increment": 0,
-    "ThinkingTime": 0,
-    "MoveNumber": 0,
-    "Move": "",
-    "MoveColor": "",
-    "Centipawns": 0.0,
-}
+def init_schema():
+    return {
+        "ID": "",
+        "MarkAsDeleted": False,
+        "White": "",
+        "Black": "",
+        "Result": "",
+        "WhiteElo": 0,
+        "BlackElo": 0,
+        "Type": "",
+        "StartingTime": 0,
+        "Increment": 0,
+        "ThinkingTime": 0,
+        "MoveNumber": 0,
+        "Move": "",
+        "MoveColor": "",
+        "Centipawns": 0.0
+    }
 
 
-def create_schema(partition, schema):
+def create_schema(partition):
+    schema = init_schema()
     for row in partition:
         value = row.value
-        if value.startswith('[White'):
+        if value.startswith('[Event'):
+            schema = init_schema()
+        elif value.startswith('[Site'):
+            schema['ID'] = value.split('"')[1].split('/')[-1]
+        elif value.startswith('[White '):
             schema['White'] = value.split('"')[1]
-        elif value.startswith('[Black'):
+        elif value.startswith('[Black '):
             schema['Black'] = value.split('"')[1]
         elif value.startswith('[Result'):
             schema['Result'] = value.split('"')[1]
@@ -48,6 +58,23 @@ def create_schema(partition, schema):
                 schema['StartingTime'] = int(time_control.split('+')[0])
                 schema['Increment'] = int(time_control.split('+')[1])
         elif value.startswith('1.'):
+            if abs(schema['WhiteElo'] - schema['BlackElo']) > 200:
+                schema['MarkAsDeleted'] = True
+                yield list(schema.values())
+                continue
+            average_elo = (schema['WhiteElo'] + schema['BlackElo']) // 2
+            if average_elo < 1000 or average_elo > 2000:
+                schema['MarkAsDeleted'] = True
+                yield list(schema.values())
+                continue
+            if schema['StartingTime'] < 600:
+                schema['MarkAsDeleted'] = True
+                yield list(schema.values())
+                continue
+            if schema['StartingTime'] == 600 or schema['StartingTime'] == 900:
+                schema['Type'] = "Rapid"
+            elif schema['StartingTime'] == 1800:
+                schema['Type'] = "Classical"
             # Regex pattern to match move number, eval score, and clock time
             pattern = r"(\d+)(\.+)\s(\S+)\s{\s\[%eval (-?\d+(\.\d+)?)\]\s\[%clk (\d+):(\d+):(\d+)\]\s}"
 
@@ -57,6 +84,7 @@ def create_schema(partition, schema):
             if len(matches) == 0:
                 schema['MarkAsDeleted'] = True
                 yield list(schema.values())
+                continue
 
             white_prev_time = schema['StartingTime']
             black_prev_time = schema['StartingTime']
@@ -79,15 +107,31 @@ def create_schema(partition, schema):
                 yield list(schema.values())
 
 
-move_df = data.rdd.mapPartitions(lambda partition: create_schema(partition, move_schema)).toDF(list(move_schema.keys()))
-move_df.persist()
-move_df.take(10)
+def spark_schema():
+    return StructType([
+        StructField("ID", StringType(), True),
+        StructField("MarkAsDeleted", BooleanType(), True),
+        StructField("White", StringType(), True),
+        StructField("Black", StringType(), True),
+        StructField("Result", StringType(), True),
+        StructField("WhiteElo", IntegerType(), True),
+        StructField("BlackElo", IntegerType(), True),
+        StructField("Type", StringType(), True),
+        StructField("StartingTime", IntegerType(), True),
+        StructField("Increment", IntegerType(), True),
+        StructField("ThinkingTime", IntegerType(), True),
+        StructField("MoveNumber", IntegerType(), True),
+        StructField("Move", StringType(), True),
+        StructField("MoveColor", StringType(), True),
+        StructField("Centipawns", FloatType(), True)
+    ])
 
-# Filter out games that are marked as deleted
-move_df.filter(move_df.MarkAsDeleted == False).show(10, False)
 
-# Print total number of moves
-print(f"Total number of moves: {move_df.count()}")
+move_df = data.rdd.mapPartitions(lambda partition: create_schema(partition)).toDF(schema=spark_schema())
+
+filter_df = move_df.filter(move_df.MarkAsDeleted == False)
+
+filter_df.write.csv(f"hdfs:///user/s2706172/lichess_per_move.csv", mode="overwrite", header=True)
 
 # Stop the Spark Session
 spark.stop()
