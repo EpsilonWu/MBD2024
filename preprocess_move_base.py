@@ -24,10 +24,12 @@ def init_schema():
         "StartingTime": 0,
         "Increment": 0,
         "ThinkingTime": 0,
+        "TimePressure": 0,
         "MoveNumber": 0,
         "Move": "",
         "MoveColor": "",
-        "Centipawns": 0.0
+        "Centipawns": 0.0,
+        "CentipawnsGain": 0.0,
     }
 
 
@@ -89,6 +91,8 @@ def create_schema(partition):
             white_prev_time = schema['StartingTime']
             black_prev_time = schema['StartingTime']
             increment = schema['Increment']
+            black_prev_centipawns = 0.0
+            white_prev_centipawns = 0.0
             for match in matches:
                 move_number, dots, move, eval_score, _, hours, minutes, seconds = match
                 is_white_move = dots == "."  # True for white moves, False for black moves
@@ -97,13 +101,18 @@ def create_schema(partition):
                 schema['MoveNumber'] = int(move_number)
                 schema['Move'] = move
                 schema['MoveColor'] = move_color
+                schema['Centipawns'] = float(eval_score)
+                schema['TimePressure'] = total_seconds
                 if is_white_move:
                     schema['ThinkingTime'] = white_prev_time + increment - total_seconds
                     white_prev_time = total_seconds
+                    schema['CentipawnsGain'] = schema['Centipawns'] - white_prev_centipawns
+                    white_prev_centipawns = schema['Centipawns']
                 else:
                     schema['ThinkingTime'] = black_prev_time + increment - total_seconds
                     black_prev_time = total_seconds
-                schema['Centipawns'] = float(eval_score)
+                    schema['CentipawnsGain'] = schema['Centipawns'] - black_prev_centipawns
+                    black_prev_centipawns = schema['Centipawns']
                 yield list(schema.values())
 
 
@@ -120,18 +129,21 @@ def spark_schema():
         StructField("StartingTime", IntegerType(), True),
         StructField("Increment", IntegerType(), True),
         StructField("ThinkingTime", IntegerType(), True),
+        StructField("TimePressure", IntegerType(), True),
         StructField("MoveNumber", IntegerType(), True),
         StructField("Move", StringType(), True),
         StructField("MoveColor", StringType(), True),
-        StructField("Centipawns", FloatType(), True)
+        StructField("Centipawns", FloatType(), True),
+        StructField("CentipawnsGain", FloatType(), True),
     ])
 
 
 move_df = data.rdd.mapPartitions(lambda partition: create_schema(partition)).toDF(schema=spark_schema())
 
 filter_df = move_df.filter(move_df.MarkAsDeleted == False)
+filter_df.show()
+filter_df.write.csv(f"hdfs:///user/s2706172/lichess_per_move_gain.csv", mode="overwrite", header=True)
 
-filter_df.write.csv(f"hdfs:///user/s2706172/lichess_per_move.csv", mode="overwrite", header=True)
 
 # Stop the Spark Session
 spark.stop()
